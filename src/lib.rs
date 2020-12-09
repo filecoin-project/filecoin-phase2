@@ -9,7 +9,7 @@
 //! Here's a silly example: proving you know the cube root of
 //! a field element.
 //!
-//! ```rust
+//! ```no_run
 //! use fff::Field;
 //! use bellperson::{
 //!     Circuit,
@@ -79,7 +79,7 @@
 //! Now that we have `CubeRoot<E>` implementing `Circuit`,
 //! let's create some parameters and make some proofs.
 //!
-//! ```rust,ignore
+//! ```compile_fail,no_run
 //! use bellperson::bls::{Bls12, Fr};
 //! use bellperson::groth16::{
 //!     generate_random_parameters,
@@ -87,7 +87,7 @@
 //!     prepare_verifying_key,
 //!     verify_proof
 //! };
-//! use rand::{OsRng, Rand};
+//! use rand::rngs::OsRng;
 //!
 //! let rng = &mut OsRng::new();
 //!
@@ -138,14 +138,14 @@
 //! In order to convince others you didn't, a multi-party
 //! computation (MPC) can be used. The MPC has the property that
 //! only one participant needs to be honest for the parameters to
-//! be secure. This crate (`phase21`) is about creating parameters
+//! be secure. This crate (`filecoin-phase2`) is about creating parameters
 //! securely using such an MPC.
 //!
-//! Let's start by using `phase21` to create some base parameters
+//! Let's start by using `filecoin-phase2` to create some base parameters
 //! for our circuit:
 //!
-//! ```rust,ignore
-//! let mut params = phase21::MPCParameters::new(CubeRoot {
+//! ```compile_fail,no_run
+//! let mut params = crate::MPCParameters::new(CubeRoot {
 //!     cube_root: None
 //! }).unwrap();
 //! ```
@@ -158,7 +158,7 @@
 //! created for them. Let's contribute some randomness to these
 //! parameters.
 //!
-//! ```rust,ignore
+//! ```compile_fail,no_run
 //! // Contribute randomness to the parameters. Remember this hash,
 //! // it's how we know our contribution is in the parameters!
 //! let hash = params.contribute(rng);
@@ -174,14 +174,14 @@
 //! Once you're done setting up the parameters, you can verify the
 //! parameters:
 //!
-//! ```rust,ignore
+//! ```compile_fail,no_run
 //! let contributions = params.verify(CubeRoot {
 //!     cube_root: None
 //! }).expect("parameters should be valid!");
 //!
 //! // We need to check the `contributions` to see if our `hash`
 //! // is in it (see above, when we first contributed)
-//! assert!(phase21::contains_contribution(&contributions, &hash));
+//! assert!(crate::contains_contribution(&contributions, &hash));
 //! ```
 //!
 //! Great, now if you're happy, grab the Groth16 `Parameters` with
