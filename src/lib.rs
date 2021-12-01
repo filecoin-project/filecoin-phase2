@@ -9,7 +9,7 @@
 //! Here's a silly example: proving you know the cube root of
 //! a field element.
 //!
-//! ```no_run
+//! ```compile_fail,no_run
 //! use fff::Field;
 //! use bellperson::{
 //!     Circuit,
@@ -188,93 +188,110 @@
 //! `params.params()`, so that you can interact with the bellman APIs
 //! just as before.
 #![deny(clippy::all, clippy::perf, clippy::correctness, rust_2018_idioms)]
+#![allow(clippy::result_unit_err)]
 
 pub mod small;
+pub mod ts1;
 
-use std::{
-    fmt::{self, Debug, Formatter},
-    fs::File,
-    io::{self, BufReader, Read, Write},
-    sync::Arc,
-};
+use std::fmt::{self, Debug, Formatter};
+use std::fs::File;
+use std::io::{self, BufReader, Read, Write};
+use std::sync::Arc;
+use std::time::Instant;
 
-use bellperson::bls::{
-    Bls12, Engine, Fr, G1Affine, G1Projective, G1Uncompressed, G2Affine, G2Projective,
-    G2Uncompressed, PairingCurveAffine,
-};
 use bellperson::{
     groth16::{Parameters, VerifyingKey},
     multicore::Worker,
     Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable,
 };
 use blake2b_simd::State as Blake2b;
+use blstrs::{Bls12, Fp, Fp2, G1Affine, G1Projective, G2Affine, G2Projective, Scalar as Fr};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use fff::{Field, PrimeField};
-use groupy::{CurveAffine, CurveProjective, EncodedPoint, Wnaf};
+use ff::Field;
+use group::{prime::PrimeCurveAffine, Curve, Group, Wnaf, WnafGroup};
 use log::{error, info};
-use rand::{Rng, SeedableRng};
+use pairing::PairingCurveAffine;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaChaRng;
-use rayon::prelude::*;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::small::MPCSmall;
 
+type G1BaseField = Fp;
+type G2BaseField = Fp2;
+
+#[inline(always)]
+fn error_not_on_curve() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "not on curve")
+}
+
+#[inline(always)]
+fn error_point_at_inf() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "point at infinity")
+}
+
+#[inline(always)]
+fn error_not_in_subgroup() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "not in subgroup")
+}
+
 /// This is our assembly structure that we'll use to synthesize the
 /// circuit into a QAP.
-struct KeypairAssembly<E: Engine> {
+struct KeypairAssembly {
     num_inputs: usize,
     num_aux: usize,
     num_constraints: usize,
-    at_inputs: Vec<Vec<(E::Fr, usize)>>,
-    bt_inputs: Vec<Vec<(E::Fr, usize)>>,
-    ct_inputs: Vec<Vec<(E::Fr, usize)>>,
-    at_aux: Vec<Vec<(E::Fr, usize)>>,
-    bt_aux: Vec<Vec<(E::Fr, usize)>>,
-    ct_aux: Vec<Vec<(E::Fr, usize)>>,
+    at_inputs: Vec<Vec<(Fr, usize)>>,
+    bt_inputs: Vec<Vec<(Fr, usize)>>,
+    ct_inputs: Vec<Vec<(Fr, usize)>>,
+    at_aux: Vec<Vec<(Fr, usize)>>,
+    bt_aux: Vec<Vec<(Fr, usize)>>,
+    ct_aux: Vec<Vec<(Fr, usize)>>,
 }
 
-impl<E: Engine> KeypairAssembly<E> {
+impl KeypairAssembly {
     /// Returns the size (stack plus heap) of the `KeypairAssembly` in bytes.
     fn size(&self) -> usize {
         use std::mem::{size_of, size_of_val};
 
         let mut size = 3 * size_of::<usize>();
-        size += 6 * size_of::<Vec<Vec<(E::Fr, usize)>>>();
-        size += size_of_val::<[Vec<(E::Fr, usize)>]>(&self.at_inputs);
-        size += size_of_val::<[Vec<(E::Fr, usize)>]>(&self.bt_inputs);
-        size += size_of_val::<[Vec<(E::Fr, usize)>]>(&self.ct_inputs);
-        size += size_of_val::<[Vec<(E::Fr, usize)>]>(&self.at_aux);
-        size += size_of_val::<[Vec<(E::Fr, usize)>]>(&self.bt_aux);
-        size += size_of_val::<[Vec<(E::Fr, usize)>]>(&self.ct_aux);
+        size += 6 * size_of::<Vec<Vec<(Fr, usize)>>>();
+        size += size_of_val::<[Vec<(Fr, usize)>]>(&self.at_inputs);
+        size += size_of_val::<[Vec<(Fr, usize)>]>(&self.bt_inputs);
+        size += size_of_val::<[Vec<(Fr, usize)>]>(&self.ct_inputs);
+        size += size_of_val::<[Vec<(Fr, usize)>]>(&self.at_aux);
+        size += size_of_val::<[Vec<(Fr, usize)>]>(&self.bt_aux);
+        size += size_of_val::<[Vec<(Fr, usize)>]>(&self.ct_aux);
 
         for el in self.at_inputs.iter() {
-            size += size_of_val::<[(E::Fr, usize)]>(el);
+            size += size_of_val::<[(Fr, usize)]>(el);
         }
         for el in self.bt_inputs.iter() {
-            size += size_of_val::<[(E::Fr, usize)]>(el);
+            size += size_of_val::<[(Fr, usize)]>(el);
         }
         for el in self.ct_inputs.iter() {
-            size += size_of_val::<[(E::Fr, usize)]>(el);
+            size += size_of_val::<[(Fr, usize)]>(el);
         }
         for el in self.at_aux.iter() {
-            size += size_of_val::<[(E::Fr, usize)]>(el);
+            size += size_of_val::<[(Fr, usize)]>(el);
         }
         for el in self.bt_aux.iter() {
-            size += size_of_val::<[(E::Fr, usize)]>(el);
+            size += size_of_val::<[(Fr, usize)]>(el);
         }
         for el in self.ct_aux.iter() {
-            size += size_of_val::<[(E::Fr, usize)]>(el);
+            size += size_of_val::<[(Fr, usize)]>(el);
         }
 
         size
     }
 }
 
-impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
+impl ConstraintSystem<Fr> for KeypairAssembly {
     type Root = Self;
 
     fn alloc<F, A, AR>(&mut self, _: A, _: F) -> Result<Variable, SynthesisError>
     where
-        F: FnOnce() -> Result<E::Fr, SynthesisError>,
+        F: FnOnce() -> Result<Fr, SynthesisError>,
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
@@ -293,7 +310,7 @@ impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
 
     fn alloc_input<F, A, AR>(&mut self, _: A, _: F) -> Result<Variable, SynthesisError>
     where
-        F: FnOnce() -> Result<E::Fr, SynthesisError>,
+        F: FnOnce() -> Result<Fr, SynthesisError>,
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
@@ -314,17 +331,17 @@ impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
-        LA: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
-        LB: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
-        LC: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
+        LA: FnOnce(LinearCombination<Fr>) -> LinearCombination<Fr>,
+        LB: FnOnce(LinearCombination<Fr>) -> LinearCombination<Fr>,
+        LC: FnOnce(LinearCombination<Fr>) -> LinearCombination<Fr>,
     {
-        fn eval<E: Engine>(
-            l: LinearCombination<E>,
-            inputs: &mut [Vec<(E::Fr, usize)>],
-            aux: &mut [Vec<(E::Fr, usize)>],
+        fn eval(
+            l: LinearCombination<Fr>,
+            inputs: &mut [Vec<(Fr, usize)>],
+            aux: &mut [Vec<(Fr, usize)>],
             this_constraint: usize,
         ) {
-            for (&var, &coeff) in l.iter() {
+            for (var, &coeff) in l.iter() {
                 match var.get_unchecked() {
                     Index::Input(id) => inputs[id].push((coeff, this_constraint)),
                     Index::Aux(id) => aux[id].push((coeff, this_constraint)),
@@ -373,7 +390,7 @@ impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
 
 /// MPC parameters are just like bellman `Parameters` except, when serialized,
 /// they contain a transcript of contributions at the end, which can be verified.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MPCParameters {
     params: Parameters<Bls12>,
     cs_hash: [u8; 64],
@@ -385,28 +402,24 @@ impl Debug for MPCParameters {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("MPCParameters")
             .field("params", &"<bellman::groth16::Parameters>")
-            .field("cs_hash", &self.cs_hash.to_vec())
+            .field("cs_hash", &self.cs_hash)
             .field("contributions", &self.contributions.to_vec())
             .finish()
     }
 }
 
-impl PartialEq for MPCParameters {
-    fn eq(&self, other: &MPCParameters) -> bool {
-        self.params == other.params
-            && self.cs_hash[..] == other.cs_hash[..]
-            && self.contributions == other.contributions
-    }
-}
-
 impl MPCParameters {
-    /// Create new Groth16 parameters (compatible with bellman) for a
-    /// given circuit. The resulting parameters are unsafe to use
-    /// until there are contributions (see `contribute()`).
-    pub fn new<C>(circuit: C) -> Result<MPCParameters, SynthesisError>
-    where
-        C: Circuit<Bls12>,
-    {
+    /// Create new Groth16 parameters (compatible with bellman) for a given circuit. The resulting
+    /// parameters are unsafe to use until there are contributions (see `contribute()`).
+    ///
+    /// If `check_subgroup` is `false` this function does not peroform the slow check that
+    /// deserialized points are in their expected subgroup (either G1 or G2).
+    //
+    // Note: `MPCParameters::new()` is compatible with both ts1 and ts2.
+    pub fn new<C: Circuit<Fr>>(
+        circuit: C,
+        check_subgroup: bool,
+    ) -> Result<MPCParameters, SynthesisError> {
         let mut assembly = KeypairAssembly {
             num_inputs: 0,
             num_aux: 0,
@@ -423,7 +436,13 @@ impl MPCParameters {
         assembly.alloc_input(|| "", || Ok(Fr::one()))?;
 
         // Synthesize the circuit.
+        info!("MPCParameters::new() synthesizing circuit");
+        let dt_synth = Instant::now();
         circuit.synthesize(&mut assembly)?;
+        info!(
+            "MPCParameters::new() sucessfully synthesized circuit, dt_synth={}s",
+            dt_synth.elapsed().as_secs(),
+        );
 
         // Input constraints to ensure full density of IC query
         // x * 0 = 0
@@ -465,73 +484,38 @@ impl MPCParameters {
         let f = match File::open(format!("phase1radix2m{}", exp)) {
             Ok(f) => f,
             Err(e) => {
+                error!("Could not find phase1.5 file: `phase1radix2m{}`", exp);
                 panic!("Couldn't load phase1radix2m{}: {:?}", exp, e);
             }
         };
-        let f = &mut BufReader::with_capacity(1024 * 1024, f);
+        let mut f = BufReader::with_capacity(1024 * 1024, f);
 
-        let read_g1 = |reader: &mut BufReader<File>| -> io::Result<G1Affine> {
-            let mut repr = G1Uncompressed::empty();
-            reader.read_exact(repr.as_mut())?;
-
-            repr.into_affine_unchecked()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-                .and_then(|e| {
-                    if e.is_zero() {
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "point at infinity",
-                        ))
-                    } else {
-                        Ok(e)
-                    }
-                })
-        };
-
-        let read_g2 = |reader: &mut BufReader<File>| -> io::Result<G2Affine> {
-            let mut repr = G2Uncompressed::empty();
-            reader.read_exact(repr.as_mut())?;
-
-            repr.into_affine_unchecked()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-                .and_then(|e| {
-                    if e.is_zero() {
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "point at infinity",
-                        ))
-                    } else {
-                        Ok(e)
-                    }
-                })
-        };
-
-        let alpha = read_g1(f)?;
-        let beta_g1 = read_g1(f)?;
-        let beta_g2 = read_g2(f)?;
+        let alpha = read_g1(&mut f, check_subgroup)?;
+        let beta_g1 = read_g1(&mut f, check_subgroup)?;
+        let beta_g2 = read_g2(&mut f, check_subgroup)?;
 
         info!("phase2::MPCParameters::new() reading coeffs_g1 from phase1.5 file");
         let mut coeffs_g1 = Vec::with_capacity(m);
         for _ in 0..m {
-            coeffs_g1.push(read_g1(f)?);
+            coeffs_g1.push(read_g1(&mut f, check_subgroup)?);
         }
 
         info!("phase2::MPCParameters::new() reading coeffs_g2 from phase1.5 file");
         let mut coeffs_g2 = Vec::with_capacity(m);
         for _ in 0..m {
-            coeffs_g2.push(read_g2(f)?);
+            coeffs_g2.push(read_g2(&mut f, check_subgroup)?);
         }
 
         info!("phase2::MPCParameters::new() reading alpha_coeffs_g1 from phase1.5 file");
         let mut alpha_coeffs_g1 = Vec::with_capacity(m);
         for _ in 0..m {
-            alpha_coeffs_g1.push(read_g1(f)?);
+            alpha_coeffs_g1.push(read_g1(&mut f, check_subgroup)?);
         }
 
         info!("phase2::MPCParameters::new() reading beta_coeffs_g1 from phase1.5 file");
         let mut beta_coeffs_g1 = Vec::with_capacity(m);
         for _ in 0..m {
-            beta_coeffs_g1.push(read_g1(f)?);
+            beta_coeffs_g1.push(read_g1(&mut f, check_subgroup)?);
         }
 
         // These are `Arc` so that later it'll be easier
@@ -542,15 +526,15 @@ impl MPCParameters {
         let alpha_coeffs_g1 = Arc::new(alpha_coeffs_g1);
         let beta_coeffs_g1 = Arc::new(beta_coeffs_g1);
 
-        let mut ic = vec![G1Projective::zero(); assembly.num_inputs];
+        let mut ic = vec![G1Projective::identity(); assembly.num_inputs];
         info!("phase2::MPCParameters::new() initialized ic vector");
-        let mut l = vec![G1Projective::zero(); assembly.num_aux];
+        let mut l = vec![G1Projective::identity(); assembly.num_aux];
         info!("phase2::MPCParameters::new() initialized l vector");
-        let mut a_g1 = vec![G1Projective::zero(); assembly.num_inputs + assembly.num_aux];
+        let mut a_g1 = vec![G1Projective::identity(); assembly.num_inputs + assembly.num_aux];
         info!("phase2::MPCParameters::new() initialized a_g1 vector");
-        let mut b_g1 = vec![G1Projective::zero(); assembly.num_inputs + assembly.num_aux];
+        let mut b_g1 = vec![G1Projective::identity(); assembly.num_inputs + assembly.num_aux];
         info!("phase2::MPCParameters::new() initialized b_g1 vector");
-        let mut b_g2 = vec![G2Projective::zero(); assembly.num_inputs + assembly.num_aux];
+        let mut b_g2 = vec![G2Projective::identity(); assembly.num_inputs + assembly.num_aux];
         info!("phase2::MPCParameters::new() initialized b_g2 vector");
 
         #[allow(clippy::too_many_arguments)]
@@ -599,7 +583,7 @@ impl MPCParameters {
                     let alpha_coeffs_g1 = alpha_coeffs_g1.clone();
                     let beta_coeffs_g1 = beta_coeffs_g1.clone();
 
-                    scope.spawn(move |_| {
+                    scope.execute(move || {
                         for ((((((a_g1, b_g1), b_g2), ext), at), bt), ct) in a_g1
                             .iter_mut()
                             .zip(b_g1.iter_mut())
@@ -610,26 +594,26 @@ impl MPCParameters {
                             .zip(ct.iter())
                         {
                             for &(coeff, lag) in at {
-                                a_g1.add_assign(&coeffs_g1[lag].mul(coeff));
-                                ext.add_assign(&beta_coeffs_g1[lag].mul(coeff));
+                                *a_g1 += coeffs_g1[lag] * coeff;
+                                *ext += beta_coeffs_g1[lag] * coeff;
                             }
 
                             for &(coeff, lag) in bt {
-                                b_g1.add_assign(&coeffs_g1[lag].mul(coeff));
-                                b_g2.add_assign(&coeffs_g2[lag].mul(coeff));
-                                ext.add_assign(&alpha_coeffs_g1[lag].mul(coeff));
+                                *b_g1 += coeffs_g1[lag] * coeff;
+                                *b_g2 += coeffs_g2[lag] * coeff;
+                                *ext += alpha_coeffs_g1[lag] * coeff;
                             }
 
                             for &(coeff, lag) in ct {
-                                ext.add_assign(&coeffs_g1[lag].mul(coeff));
+                                *ext += coeffs_g1[lag] * coeff;
                             }
                         }
 
-                        // Batch normalize
-                        G1Projective::batch_normalization(a_g1);
-                        G1Projective::batch_normalization(b_g1);
-                        G2Projective::batch_normalization(b_g2);
-                        G1Projective::batch_normalization(ext);
+                        // Normalize projective points
+                        batch_normalization_g1(a_g1);
+                        batch_normalization_g1(b_g1);
+                        batch_normalization_g2(b_g2);
+                        batch_normalization_g1(ext);
                     });
                 }
             });
@@ -674,19 +658,19 @@ impl MPCParameters {
         // Don't allow any elements be unconstrained, so that
         // the L query is always fully dense.
         for e in l.iter() {
-            if e.is_zero() {
+            if e.is_identity().into() {
                 return Err(SynthesisError::UnconstrainedVariable);
             }
         }
 
-        let vk = VerifyingKey {
+        let vk = VerifyingKey::<Bls12> {
             alpha_g1: alpha,
             beta_g1,
             beta_g2,
-            gamma_g2: G2Affine::one(),
-            delta_g1: G1Affine::one(),
-            delta_g2: G2Affine::one(),
-            ic: ic.into_par_iter().map(|e| e.into_affine()).collect(),
+            gamma_g2: G2Affine::generator(),
+            delta_g1: G1Affine::generator(),
+            delta_g2: G2Affine::generator(),
+            ic: ic.into_par_iter().map(|e| e.to_affine()).collect(),
         };
 
         // Reclaim the memory used by these vectors prior to reading in `h`.
@@ -698,31 +682,31 @@ impl MPCParameters {
         info!("phase2::MPCParameters::new() reading h from phase1.5 file");
         let mut h = Vec::with_capacity(m - 1);
         for _ in 0..(m - 1) {
-            h.push(read_g1(f)?);
+            h.push(read_g1(&mut f, check_subgroup)?);
         }
 
         let params = Parameters {
             vk,
             h: Arc::new(h),
-            l: Arc::new(l.into_par_iter().map(|e| e.into_affine()).collect()),
+            l: Arc::new(l.into_par_iter().map(|e| e.to_affine()).collect()),
 
             // Filter points at infinity away from A/B queries
             a: Arc::new(
                 a_g1.into_par_iter()
-                    .filter(|e| !e.is_zero())
-                    .map(|e| e.into_affine())
+                    .filter(|e| !bool::from(e.is_identity()))
+                    .map(|e| e.to_affine())
                     .collect(),
             ),
             b_g1: Arc::new(
                 b_g1.into_par_iter()
-                    .filter(|e| !e.is_zero())
-                    .map(|e| e.into_affine())
+                    .filter(|e| !bool::from(e.is_identity()))
+                    .map(|e| e.to_affine())
                     .collect(),
             ),
             b_g2: Arc::new(
                 b_g2.into_par_iter()
-                    .filter(|e| !e.is_zero())
-                    .map(|e| e.into_affine())
+                    .filter(|e| !bool::from(e.is_identity()))
+                    .map(|e| e.to_affine())
                     .collect(),
             ),
         };
@@ -745,6 +729,11 @@ impl MPCParameters {
 
             sink.into_hash()
         };
+
+        info!(
+            "phase2::MPCParameters::new() cs_hash={}",
+            pretty_cs_hash(&cs_hash)
+        );
 
         Ok(MPCParameters {
             params,
@@ -771,62 +760,29 @@ impl MPCParameters {
     /// sure their contribution is in the final parameters, by
     /// checking to see if it appears in the output of
     /// `MPCParameters::verify`.
-    pub fn contribute<R: Rng>(&mut self, rng: &mut R) -> [u8; 64] {
+    // TODO: make this compatible with ts1
+    // pub fn contribute_ts1(&mut self, rng: impl rand_ts1::RngCore) -> [u8; 64] {
+    pub fn contribute(&mut self, rng: impl RngCore) -> [u8; 64] {
         // Generate a keypair
+        // TODO: make this compatible with ts1
+        // let (pubkey, privkey) = keypair_ts1(rng, self);
         let (pubkey, privkey) = keypair(rng, self);
 
-        fn batch_exp<C: CurveAffine>(bases: &mut [C], coeff: C::Scalar) {
-            let coeff = coeff.into_repr();
+        let delta_inv = match privkey.delta.invert() {
+            opt if opt.is_some().into() => opt.unwrap(),
+            _ => panic!("private-key's `delta` is zero, cannot invert"),
+        };
 
-            let mut projective = vec![C::Projective::zero(); bases.len()];
-            let cpus = num_cpus::get();
-            let chunk_size = if bases.len() < cpus {
-                1
-            } else {
-                bases.len() / cpus
-            };
-
-            // Perform wNAF over multiple cores, placing results into `projective`.
-            crossbeam::thread::scope(|scope| {
-                for (bases, projective) in bases
-                    .chunks_mut(chunk_size)
-                    .zip(projective.chunks_mut(chunk_size))
-                {
-                    scope.spawn(move |_| {
-                        let mut wnaf = Wnaf::new();
-
-                        for (base, projective) in bases.iter_mut().zip(projective.iter_mut()) {
-                            *projective = wnaf.base(base.into_projective(), 1).scalar(coeff);
-                        }
-
-                        C::Projective::batch_normalization(projective);
-                        projective
-                            .iter()
-                            .zip(bases.iter_mut())
-                            .for_each(|(projective, affine)| {
-                                *affine = projective.into_affine();
-                            });
-                    });
-                }
-            })
-            .unwrap();
-        }
-
-        let delta_inv = privkey.delta.inverse().expect("nonzero");
-        info!("phase2::MPCParameters::contribute() copying l");
-        let mut l = (&self.params.l[..]).to_vec();
-        info!("phase2::MPCParameters::contribute() copying h");
-        let mut h = (&self.params.h[..]).to_vec();
         info!("phase2::MPCParameters::contribute() performing batch exponentiation of l");
-        batch_exp(&mut l, delta_inv);
-        info!("phase2::MPCParameters::contribute() performing batch exponentiation of h");
-        batch_exp(&mut h, delta_inv);
-        info!("phase2::MPCParameters::contribute() finished batch exponentiations");
-        self.params.l = Arc::new(l);
-        self.params.h = Arc::new(h);
+        batch_exp(Arc::get_mut(&mut self.params.l).unwrap(), delta_inv);
 
-        self.params.vk.delta_g1 = self.params.vk.delta_g1.mul(privkey.delta).into_affine();
-        self.params.vk.delta_g2 = self.params.vk.delta_g2.mul(privkey.delta).into_affine();
+        info!("phase2::MPCParameters::contribute() performing batch exponentiation of h");
+        batch_exp(Arc::get_mut(&mut self.params.h).unwrap(), delta_inv);
+
+        info!("phase2::MPCParameters::contribute() finished batch exponentiations");
+
+        self.params.vk.delta_g1 = (self.params.vk.delta_g1 * privkey.delta).to_affine();
+        self.params.vk.delta_g2 = (self.params.vk.delta_g2 * privkey.delta).to_affine();
 
         self.contributions.push(pubkey.clone());
 
@@ -844,8 +800,12 @@ impl MPCParameters {
     /// contributors obtained when they ran
     /// `MPCParameters::contribute`, for ensuring that contributions
     /// exist in the final parameters.
-    pub fn verify<C: Circuit<Bls12>>(&self, circuit: C) -> Result<Vec<[u8; 64]>, ()> {
-        let initial_params = MPCParameters::new(circuit).map_err(|_| ())?;
+    pub fn verify<C: Circuit<Fr>>(
+        &self,
+        circuit: C,
+        check_subgroup: bool,
+    ) -> Result<Vec<[u8; 64]>, ()> {
+        let initial_params = MPCParameters::new(circuit, check_subgroup).map_err(|_| ())?;
 
         // H/L will change, but should have same length
         if initial_params.params.h.len() != self.params.h.len() {
@@ -896,25 +856,23 @@ impl MPCParameters {
         }
 
         // cs_hash should be the same
-        if initial_params.cs_hash[..] != self.cs_hash[..] {
+        if initial_params.cs_hash != self.cs_hash {
             error!("phase2::MPCParameters::verify() cs_hash has changed");
             return Err(());
         }
 
         let sink = io::sink();
         let mut sink = HashWriter::new(sink);
-        sink.write_all(&initial_params.cs_hash[..]).unwrap();
+        sink.write_all(&initial_params.cs_hash).unwrap();
 
-        let mut current_delta = G1Affine::one();
+        let mut current_delta = G1Affine::generator();
         let mut result = vec![];
 
         for pubkey in &self.contributions {
             let mut our_sink = sink.clone();
+            our_sink.write_all(&pubkey.s.to_uncompressed()).unwrap();
             our_sink
-                .write_all(pubkey.s.into_uncompressed().as_ref())
-                .unwrap();
-            our_sink
-                .write_all(pubkey.s_delta.into_uncompressed().as_ref())
+                .write_all(&pubkey.s_delta.to_uncompressed())
                 .unwrap();
 
             pubkey.write(&mut sink).unwrap();
@@ -922,12 +880,14 @@ impl MPCParameters {
             let h = our_sink.into_hash();
 
             // The transcript must be consistent
-            if &pubkey.transcript[..] != h.as_ref() {
+            if pubkey.transcript != h {
                 error!("phase2::MPCParameters::verify() transcripts differ");
                 return Err(());
             }
 
-            let r = hash_to_g2(h.as_ref()).into_affine();
+            // TODO: make this compatible with ts1
+            // let r = hash_to_g2_ts1(&h).to_affine();
+            let r = hash_to_g2(&h).to_affine();
 
             // Check the signature of knowledge
             if !same_ratio((r, pubkey.r_delta), (pubkey.s, pubkey.s_delta)) {
@@ -959,8 +919,8 @@ impl MPCParameters {
 
         // Current parameters should have consistent delta in G2
         if !same_ratio(
-            (G1Affine::one(), current_delta),
-            (G2Affine::one(), self.params.vk.delta_g2),
+            (G1Affine::generator(), current_delta),
+            (G2Affine::generator(), self.params.vk.delta_g2),
         ) {
             error!("phase2::MPCParameters::verify() shift in vk's delta_g2 is inconsistent with calculated delta");
             return Err(());
@@ -969,7 +929,7 @@ impl MPCParameters {
         // H and L queries should be updated with delta^-1
         if !same_ratio(
             merge_pairs(&initial_params.params.h, &self.params.h),
-            (self.params.vk.delta_g2, G2Affine::one()), // reversed for inverse
+            (self.params.vk.delta_g2, G2Affine::generator()), // reversed for inverse
         ) {
             error!("phase2::MPCParameters::verify() h queries have not shifted by delta^-1");
             return Err(());
@@ -977,7 +937,7 @@ impl MPCParameters {
 
         if !same_ratio(
             merge_pairs(&initial_params.params.l, &self.params.l),
-            (self.params.vk.delta_g2, G2Affine::one()), // reversed for inverse
+            (self.params.vk.delta_g2, G2Affine::generator()), // reversed for inverse
         ) {
             error!("phase2::MPCParameters::verify() l queries have not shifted by delta^-1");
             return Err(());
@@ -1002,17 +962,17 @@ impl MPCParameters {
 
     /// Serializes these parameters as `MPCSmall`.
     pub fn write_small<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        writer.write_all(self.params.vk.delta_g1.into_uncompressed().as_ref())?;
-        writer.write_all(self.params.vk.delta_g2.into_uncompressed().as_ref())?;
+        writer.write_all(&self.params.vk.delta_g1.to_uncompressed())?;
+        writer.write_all(&self.params.vk.delta_g2.to_uncompressed())?;
 
         writer.write_u32::<BigEndian>(self.params.h.len() as u32)?;
         for h in &*self.params.h {
-            writer.write_all(h.into_uncompressed().as_ref())?;
+            writer.write_all(&h.to_uncompressed())?;
         }
 
         writer.write_u32::<BigEndian>(self.params.l.len() as u32)?;
         for l in &*self.params.l {
-            writer.write_all(l.into_uncompressed().as_ref())?;
+            writer.write_all(&l.to_uncompressed())?;
         }
 
         writer.write_all(&self.cs_hash)?;
@@ -1025,11 +985,10 @@ impl MPCParameters {
         Ok(())
     }
 
-    /// Deserialize these parameters. If `checked` is false,
-    /// we won't perform curve validity and group order
-    /// checks.
-    pub fn read<R: Read>(mut reader: R, checked: bool) -> io::Result<MPCParameters> {
-        let params = Parameters::read(&mut reader, checked)?;
+    /// Deserialize these parameters. If `check_subgroup` is `false` this function does not peroform
+    /// the slow check that deserialized points are in their expected subgroup (either G1 or G2).
+    pub fn read<R: Read>(mut reader: R, check_subgroup: bool) -> io::Result<MPCParameters> {
+        let params = Parameters::read(&mut reader, check_subgroup)?;
 
         let mut cs_hash = [0u8; 64];
         reader.read_exact(&mut cs_hash)?;
@@ -1038,7 +997,7 @@ impl MPCParameters {
 
         let mut contributions = vec![];
         for _ in 0..contributions_len {
-            contributions.push(PublicKey::read(&mut reader)?);
+            contributions.push(PublicKey::read(&mut reader, check_subgroup)?);
         }
 
         info!(
@@ -1091,8 +1050,7 @@ impl MPCParameters {
     // and l Arc's have ref-count 1, then they will be dropped.
     pub fn add_contrib(&mut self, contrib: MPCSmall) {
         assert_eq!(
-            self.cs_hash[..],
-            contrib.cs_hash[..],
+            self.cs_hash, contrib.cs_hash,
             "large and small params have different cs_hash"
         );
 
@@ -1148,14 +1106,14 @@ impl MPCParameters {
             && self.params.vk.delta_g2 == small.delta_g2
             && *self.params.h == small.h
             && *self.params.l == small.l
-            && self.cs_hash[..] == small.cs_hash[..]
+            && self.cs_hash == small.cs_hash
             && self.contributions == small.contributions
     }
 }
 
 /// This allows others to verify that you contributed. The hash produced
 /// by `MPCParameters::contribute` is just a BLAKE2b hash of this object.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PublicKey {
     /// This is the delta (in G1) after the transformation, kept so that we
     /// can check correctness of the public keys without having the entire
@@ -1188,69 +1146,76 @@ impl Debug for PublicKey {
     }
 }
 
+#[inline]
+pub fn read_g1<R: Read>(reader: &mut R, check_subgroup: bool) -> io::Result<G1Affine> {
+    let mut repr = [0u8; G1Affine::uncompressed_size()];
+    reader.read_exact(&mut repr)?;
+
+    let opt = G1Affine::from_uncompressed_unchecked(&repr);
+    let is_valid: bool = opt.is_some().into();
+    if !is_valid {
+        return Err(error_not_on_curve());
+    }
+
+    let affine = opt.unwrap();
+
+    if affine.is_identity().into() {
+        return Err(error_point_at_inf());
+    }
+
+    if check_subgroup {
+        let is_in_subgroup: bool = affine.is_torsion_free().into();
+        if !is_in_subgroup {
+            return Err(error_not_in_subgroup());
+        }
+    }
+
+    Ok(affine)
+}
+
+#[inline]
+pub fn read_g2<R: Read>(reader: &mut R, check_subgroup: bool) -> io::Result<G2Affine> {
+    let mut repr = [0u8; G2Affine::uncompressed_size()];
+    reader.read_exact(&mut repr)?;
+
+    let opt = G2Affine::from_uncompressed_unchecked(&repr);
+    let is_valid: bool = opt.is_some().into();
+    if !is_valid {
+        return Err(error_not_on_curve());
+    }
+
+    let affine = opt.unwrap();
+
+    if affine.is_identity().into() {
+        return Err(error_point_at_inf());
+    }
+
+    if check_subgroup {
+        let is_in_subgroup: bool = affine.is_torsion_free().into();
+        if !is_in_subgroup {
+            return Err(error_not_in_subgroup());
+        }
+    }
+
+    Ok(affine)
+}
+
 impl PublicKey {
     fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        writer.write_all(self.delta_after.into_uncompressed().as_ref())?;
-        writer.write_all(self.s.into_uncompressed().as_ref())?;
-        writer.write_all(self.s_delta.into_uncompressed().as_ref())?;
-        writer.write_all(self.r_delta.into_uncompressed().as_ref())?;
+        writer.write_all(&self.delta_after.to_uncompressed())?;
+        writer.write_all(&self.s.to_uncompressed())?;
+        writer.write_all(&self.s_delta.to_uncompressed())?;
+        writer.write_all(&self.r_delta.to_uncompressed())?;
         writer.write_all(&self.transcript)?;
 
         Ok(())
     }
 
-    fn read<R: Read>(mut reader: R) -> io::Result<PublicKey> {
-        let mut g1_repr = G1Uncompressed::empty();
-        let mut g2_repr = G2Uncompressed::empty();
-
-        reader.read_exact(g1_repr.as_mut())?;
-        let delta_after = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        if delta_after.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "point at infinity",
-            ));
-        }
-
-        reader.read_exact(g1_repr.as_mut())?;
-        let s = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        if s.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "point at infinity",
-            ));
-        }
-
-        reader.read_exact(g1_repr.as_mut())?;
-        let s_delta = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        if s_delta.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "point at infinity",
-            ));
-        }
-
-        reader.read_exact(g2_repr.as_mut())?;
-        let r_delta = g2_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        if r_delta.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "point at infinity",
-            ));
-        }
-
+    fn read<R: Read>(mut reader: R, check_subgroup: bool) -> io::Result<PublicKey> {
+        let delta_after = read_g1(&mut reader, check_subgroup)?;
+        let s = read_g1(&mut reader, check_subgroup)?;
+        let s_delta = read_g1(&mut reader, check_subgroup)?;
+        let r_delta = read_g2(&mut reader, check_subgroup)?;
         let mut transcript = [0u8; 64];
         reader.read_exact(&mut transcript)?;
 
@@ -1261,16 +1226,6 @@ impl PublicKey {
             r_delta,
             transcript,
         })
-    }
-}
-
-impl PartialEq for PublicKey {
-    fn eq(&self, other: &PublicKey) -> bool {
-        self.delta_after == other.delta_after
-            && self.s == other.s
-            && self.s_delta == other.s_delta
-            && self.r_delta == other.r_delta
-            && self.transcript[..] == other.transcript[..]
     }
 }
 
@@ -1289,7 +1244,7 @@ pub fn verify_contribution(before: &MPCParameters, after: &MPCParameters) -> Res
     }
 
     // None of the previous transformations should change
-    if before.contributions[..] != after.contributions[0..before.contributions.len()] {
+    if before.contributions != after.contributions[..after.contributions.len() - 1] {
         error!("phase2::verify_contribution() 'after' params contributions differ from 'before' params contributions");
         return Err(());
     }
@@ -1304,7 +1259,7 @@ pub fn verify_contribution(before: &MPCParameters, after: &MPCParameters) -> Res
         return Err(());
     }
 
-    // A/B_G1/B_G2 doesn't change at all
+    // A, B_G1, and B_G2 don't change
     if before.params.a != after.params.a {
         error!("phase2::verify_contribution() evaluated QAP a polynomial has changed");
         return Err(());
@@ -1318,7 +1273,7 @@ pub fn verify_contribution(before: &MPCParameters, after: &MPCParameters) -> Res
         return Err(());
     }
 
-    // alpha/beta/gamma don't change
+    // alpha, beta, and gamma don't change
     if before.params.vk.alpha_g1 != after.params.vk.alpha_g1 {
         error!("phase2::verify_contribution() vk's alpha_g1 hash changed");
         return Err(());
@@ -1343,34 +1298,34 @@ pub fn verify_contribution(before: &MPCParameters, after: &MPCParameters) -> Res
     }
 
     // cs_hash should be the same
-    if before.cs_hash[..] != after.cs_hash[..] {
+    if before.cs_hash != after.cs_hash {
         error!("phase2::verify_contribution() cs_hash has changed");
         return Err(());
     }
 
     let sink = io::sink();
     let mut sink = HashWriter::new(sink);
-    sink.write_all(&before.cs_hash[..]).unwrap();
+    sink.write_all(&before.cs_hash).unwrap();
 
     for pubkey in &before.contributions {
         pubkey.write(&mut sink).unwrap();
     }
 
     let pubkey = after.contributions.last().unwrap();
-    sink.write_all(pubkey.s.into_uncompressed().as_ref())
-        .unwrap();
-    sink.write_all(pubkey.s_delta.into_uncompressed().as_ref())
-        .unwrap();
+    sink.write_all(&pubkey.s.to_uncompressed()).unwrap();
+    sink.write_all(&pubkey.s_delta.to_uncompressed()).unwrap();
 
     let h = sink.into_hash();
 
     // The transcript must be consistent
-    if &pubkey.transcript[..] != h.as_ref() {
+    if pubkey.transcript != h {
         error!("phase2::verify_contribution() inconsistent transcript");
         return Err(());
     }
 
-    let r = hash_to_g2(h.as_ref()).into_affine();
+    // TODO: make this compatible with ts1
+    // let r = hash_to_g2_ts1(&h).to_affine();
+    let r = hash_to_g2(&h).to_affine();
 
     // Check the signature of knowledge
     if !same_ratio((r, pubkey.r_delta), (pubkey.s, pubkey.s_delta)) {
@@ -1397,8 +1352,8 @@ pub fn verify_contribution(before: &MPCParameters, after: &MPCParameters) -> Res
 
     // Current parameters should have consistent delta in G2
     if !same_ratio(
-        (G1Affine::one(), pubkey.delta_after),
-        (G2Affine::one(), after.params.vk.delta_g2),
+        (G1Affine::generator(), pubkey.delta_after),
+        (G2Affine::generator(), after.params.vk.delta_g2),
     ) {
         error!("phase2::verify_contribution() contribution's shift in delta (G1) is inconsistent with vk's shift in delta (G2)");
         return Err(());
@@ -1445,7 +1400,20 @@ pub(crate) fn same_ratio<G1: PairingCurveAffine>(g1: (G1, G1), g2: (G1::Pair, G1
 /// e(g, (as)*r1 + (bs)*r2 + (cs)*r3) = e(g^s, a*r1 + b*r2 + c*r3)
 ///
 /// ... with high probability.
-pub(crate) fn merge_pairs<G: CurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
+///
+/// The type parameter `G` should be an affine curve (i.e. `G: PrimeCurveAffine`) whose [projective]
+/// points (`G::Curve`) can be multiplied by scalars (`G::Scalar`) via Wnaf (i.e.
+/// `G::Curve: WnafGroup`).
+///
+/// This function returns a 2-tuple of affine points `(G, G)`; the first tuple value is the
+/// output of the random linear-combination of `v1`'s elements and the second tuple value the output
+/// of `v2`'s random linear-combination.
+/// linear-combination of `v2`.
+pub(crate) fn merge_pairs<G>(v1: &[G], v2: &[G]) -> (G, G)
+where
+    G: PrimeCurveAffine,
+    G::Curve: WnafGroup,
+{
     use rand::thread_rng;
     use std::sync::Mutex;
 
@@ -1453,9 +1421,14 @@ pub(crate) fn merge_pairs<G: CurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
 
     let chunk = (v1.len() / num_cpus::get()) + 1;
 
-    let s = Arc::new(Mutex::new(G::Projective::zero()));
-    let sx = Arc::new(Mutex::new(G::Projective::zero()));
+    // Initialize the first and second linear-combination sums to zero, i.e. the point-at-infinity.
+    let s = Arc::new(Mutex::new(G::Curve::identity()));
+    let sx = Arc::new(Mutex::new(G::Curve::identity()));
 
+    // Zip and chunk the two input arrays. Launch a thread for each chunk which computes a random
+    // linear-combination of its first chunk's values and its second chunk's values using the same
+    // set of random values for both chunks. The `i`-th element of the first and second chunks are
+    // scaled by the same random scalar.
     crossbeam::thread::scope(|scope| {
         for (v1, v2) in v1.chunks(chunk).zip(v2.chunks(chunk)) {
             let s = s.clone();
@@ -1464,31 +1437,40 @@ pub(crate) fn merge_pairs<G: CurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
             scope.spawn(move |_| {
                 // We do not need to be overly cautious of the RNG
                 // used for this check.
-                let rng = &mut thread_rng();
+                let mut rng = thread_rng();
 
                 let mut wnaf = Wnaf::new();
-                let mut local_s = G::Projective::zero();
-                let mut local_sx = G::Projective::zero();
 
+                // Store the sums for this thread's first and second linear-combinations; these sums
+                // will be added to the first and second arrays' totals at the end of the thread.
+                let mut local_s = G::Curve::identity();
+                let mut local_sx = G::Curve::identity();
+
+                // For the `i`-th element in each chunk, generate a random value and scale the
+                // `i`-th element in the first and second chunks by that random value, then add the
+                // first and second scaled values to their corresponding sums.
                 for (v1, v2) in v1.iter().zip(v2.iter()) {
-                    let rho = G::Scalar::random(rng);
-                    let mut wnaf = wnaf.scalar(rho.into_repr());
-                    let v1 = wnaf.base(v1.into_projective());
-                    let v2 = wnaf.base(v2.into_projective());
+                    // This call to `random` does not need to be compatible with ts1's `random`
+                    // because we just need a uniformly sampled scalar, which can be done with
+                    // either ts1 or ts2.
+                    let rho = G::Scalar::random(&mut rng);
+                    let mut wnaf = wnaf.scalar(&rho);
+                    let v1 = wnaf.base(v1.to_curve());
+                    let v2 = wnaf.base(v2.to_curve());
 
-                    local_s.add_assign(&v1);
-                    local_sx.add_assign(&v2);
+                    local_s += v1;
+                    local_sx += v2;
                 }
 
-                s.lock().unwrap().add_assign(&local_s);
-                sx.lock().unwrap().add_assign(&local_sx);
+                *s.lock().unwrap() += local_s;
+                *sx.lock().unwrap() += local_sx;
             });
         }
     })
     .unwrap();
 
-    let s = s.lock().unwrap().into_affine();
-    let sx = sx.lock().unwrap().into_affine();
+    let s = s.lock().unwrap().to_affine();
+    let sx = sx.lock().unwrap().to_affine();
 
     (s, sx)
 }
@@ -1502,26 +1484,31 @@ struct PrivateKey {
 /// Compute a keypair, given the current parameters. Keypairs
 /// cannot be reused for multiple contributions or contributions
 /// in different parameters.
-fn keypair<R: Rng>(rng: &mut R, current: &MPCParameters) -> (PublicKey, PrivateKey) {
+// TODO: make this compatible with ts1
+// fn keypair_ts1(mut rng: impl rand_ts1::RngCore, current: &MPCParameters) -> (PublicKey, PrivateKey) {
+fn keypair(mut rng: impl RngCore, current: &MPCParameters) -> (PublicKey, PrivateKey) {
     // Sample random delta
-    let delta: Fr = Fr::random(rng);
+    // TODO: make this compatible with ts1
+    // let delta = rand_fr_ts1(&mut rng);
+    let delta = Fr::random(&mut rng);
 
     // Compute delta s-pair in G1
-    let s = G1Projective::random(rng).into_affine();
-    let s_delta = s.mul(delta).into_affine();
+    // TODO: make this compatible with ts1
+    // let s = rand_g1_ts1(&mut rng).to_affine();
+    let s = G1Projective::random(&mut rng).to_affine();
+    let s_delta: G1Affine = (s * delta).to_affine();
 
     // H(cs_hash | <previous pubkeys> | s | s_delta)
     let h = {
         let sink = io::sink();
         let mut sink = HashWriter::new(sink);
 
-        sink.write_all(&current.cs_hash[..]).unwrap();
+        sink.write_all(&current.cs_hash).unwrap();
         for pubkey in &current.contributions {
             pubkey.write(&mut sink).unwrap();
         }
-        sink.write_all(s.into_uncompressed().as_ref()).unwrap();
-        sink.write_all(s_delta.into_uncompressed().as_ref())
-            .unwrap();
+        sink.write_all(&s.to_uncompressed()).unwrap();
+        sink.write_all(&s_delta.to_uncompressed()).unwrap();
 
         sink.into_hash()
     };
@@ -1531,12 +1518,17 @@ fn keypair<R: Rng>(rng: &mut R, current: &MPCParameters) -> (PublicKey, PrivateK
     let transcript = h;
 
     // Compute delta s-pair in G2
-    let r = hash_to_g2(&h).into_affine();
-    let r_delta = r.mul(delta).into_affine();
+    // TODO: make this compatible with ts1
+    // let r = hash_to_g2_ts1(&h).to_affine();
+    let r = hash_to_g2(&h).to_affine();
+    let r_delta = (r * delta).to_affine();
+
+    // Update `delta_g1`.
+    let delta_after = (current.params.vk.delta_g1 * delta).to_affine();
 
     (
         PublicKey {
-            delta_after: current.params.vk.delta_g1.mul(delta).into_affine(),
+            delta_after,
             s,
             s_delta,
             r_delta,
@@ -1605,15 +1597,161 @@ impl<W: Write> Write for HashWriter<W> {
     }
 }
 
-/// This is a cheap helper utility that exists purely
-/// because Rust still doesn't have type-level integers
-/// and so doesn't implement `PartialEq` for `[T; 64]`
-pub fn contains_contribution(contributions: &[[u8; 64]], my_contribution: &[u8; 64]) -> bool {
-    for contrib in contributions {
-        if contrib[..] == my_contribution[..] {
-            return true;
+#[inline(always)]
+fn is_normalized_g1(proj: &G1Projective) -> bool {
+    proj.is_identity().into() || proj.z() == G1BaseField::one()
+}
+
+#[inline(always)]
+fn is_normalized_g2(proj: &G2Projective) -> bool {
+    proj.is_identity().into() || proj.z() == G2BaseField::one()
+}
+
+fn batch_normalization_g1(proj: &mut [G1Projective]) {
+    // Montgomery’s Trick and Fast Implementation of Masked AES
+    // Genelle, Prouff and Quisquater
+    // Section 3.2
+
+    // First pass: compute [z_1, (z_1)(z_2), (z_1)(z_2)(z_3), ..., (z_1)...(z_n)]
+    let mut prod = Vec::with_capacity(proj.len());
+    let mut tmp = G1BaseField::one();
+    for g in proj.iter() {
+        // Ignore normalized elements
+        if !is_normalized_g1(g) {
+            tmp *= g.z();
+            prod.push(tmp);
         }
     }
 
-    false
+    // Invert `tmp`.
+    tmp = tmp.invert().unwrap(); // Guaranteed to be nonzero.
+
+    // Second pass: iterate backwards to compute inverses
+    for (g, s) in proj
+        .iter_mut()
+        // Backwards
+        .rev()
+        // Ignore normalized elements
+        .filter(|g| !is_normalized_g1(g))
+        // Backwards, skip last element, fill in one for last term.
+        .zip(
+            prod.into_iter()
+                .rev()
+                .skip(1)
+                .chain(Some(G1BaseField::one())),
+        )
+    {
+        // Update `g.z` and `tmp` simultaneously: `g.z = tmp * s = 1/g.z` and `tmp = tmp * g.z`.
+        let z_inv = tmp * s;
+        tmp *= g.z();
+        *g = G1Projective::from_raw_unchecked(g.x(), g.y(), z_inv);
+    }
+
+    // Perform affine transformations
+    for g in proj.iter_mut().filter(|g| !is_normalized_g1(g)) {
+        let z = g.z(); // 1/z
+        let z_sq = z.square(); // 1/z^2
+        let x_new = g.x() * z_sq; // x/z^2
+        let z_cube = z_sq * z; // 1/z^3
+        let y_new = g.y() * z_cube; // y/z^3
+        let z_new = G1BaseField::one(); // z = 1
+        *g = G1Projective::from_raw_unchecked(x_new, y_new, z_new);
+    }
+}
+
+fn batch_normalization_g2(proj: &mut [G2Projective]) {
+    // Montgomery’s Trick and Fast Implementation of Masked AES
+    // Genelle, Prouff and Quisquater
+    // Section 3.2
+
+    // First pass: compute [z_1, (z_1)(z_2), (z_1)(z_2)(z_3), ..., (z_1)...(z_n)]
+    let mut prod = Vec::with_capacity(proj.len());
+    let mut tmp = G2BaseField::one();
+    for g in proj.iter() {
+        // Ignore normalized elements
+        if !is_normalized_g2(g) {
+            tmp *= g.z();
+            prod.push(tmp);
+        }
+    }
+
+    // Invert `tmp`.
+    tmp = tmp.invert().unwrap(); // Guaranteed to be nonzero.
+
+    // Second pass: iterate backwards to compute inverses
+    for (g, s) in proj
+        .iter_mut()
+        // Backwards
+        .rev()
+        // Ignore normalized elements
+        .filter(|g| !is_normalized_g2(g))
+        // Backwards, skip last element, fill in one for last term.
+        .zip(
+            prod.into_iter()
+                .rev()
+                .skip(1)
+                .chain(Some(G2BaseField::one())),
+        )
+    {
+        // Update `g.z` and `tmp` simultaneously: `g.z = tmp * s = 1/g.z` and `tmp = tmp * g.z`.
+        let z_inv = tmp * s;
+        tmp *= g.z();
+        *g = G2Projective::from_raw_unchecked(g.x(), g.y(), z_inv);
+    }
+
+    // Perform affine transformations
+    for g in proj.iter_mut().filter(|g| !is_normalized_g2(g)) {
+        let z = g.z(); // 1/z
+        let z_sq = z.square(); // 1/z^2
+        let x_new = g.x() * z_sq; // x/z^2
+        let z_cube = z_sq * z; // 1/z^3
+        let y_new = g.y() * z_cube; // y/z^3
+        let z_new = G2BaseField::one(); // z = 1
+        *g = G2Projective::from_raw_unchecked(x_new, y_new, z_new);
+    }
+}
+
+// Replaces each affine point in `bases` with its scalar product with `coeff`.
+//
+// Note that our curve groups are written additively, thus this method is not exponentiating as the
+// name "batch_exp" would suggest (which would be the case if our curve groups were written
+// multiplicatively), but rather batch scalar multiplying.
+fn batch_exp(bases: &mut [G1Affine], coeff: Fr) {
+    let mut projective = vec![G1Projective::identity(); bases.len()];
+
+    let cpus = num_cpus::get();
+    let chunk_size = if bases.len() < cpus {
+        1
+    } else {
+        bases.len() / cpus
+    };
+
+    // Perform wNAF over multiple cores, placing results into `projective`.
+    crossbeam::thread::scope(|scope| {
+        for (bases, projective) in bases
+            .chunks_mut(chunk_size)
+            .zip(projective.chunks_mut(chunk_size))
+        {
+            scope.spawn(move |_| {
+                let mut wnaf = Wnaf::new();
+                for (base, projective) in bases.iter().zip(projective.iter_mut()) {
+                    *projective = wnaf.base(base.to_curve(), 1).scalar(&coeff);
+                }
+                batch_normalization_g1(projective);
+                projective
+                    .iter()
+                    .zip(bases.iter_mut())
+                    .for_each(|(projective, affine)| {
+                        *affine = projective.to_affine();
+                    });
+            });
+        }
+    })
+    .unwrap();
+}
+
+#[inline]
+pub fn pretty_cs_hash(cs_hash: &[u8; 64]) -> String {
+    let s = hex::encode(cs_hash);
+    format!("{}...{}", &s[..10], &s[128 - 10..])
 }

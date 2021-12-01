@@ -1,19 +1,21 @@
-use bellperson::bls::Engine;
+#![allow(clippy::needless_range_loop)]
+
 use bellperson::{Circuit, ConstraintSystem, SynthesisError};
-use fff::Field;
+use blstrs::Scalar as Fr;
+use ff::Field;
 
 pub const MIMC_ROUNDS: usize = 322;
 
-pub fn mimc<E: Engine>(mut xl: E::Fr, mut xr: E::Fr, constants: &[E::Fr]) -> E::Fr {
+pub fn mimc(mut xl: Fr, mut xr: Fr, constants: &[Fr]) -> Fr {
     assert_eq!(constants.len(), MIMC_ROUNDS);
 
     for i in 0..MIMC_ROUNDS {
         let mut tmp1 = xl;
-        tmp1.add_assign(&constants[i]);
+        tmp1 += constants[i];
         let mut tmp2 = tmp1;
-        tmp2.square();
-        tmp2.mul_assign(&tmp1);
-        tmp2.add_assign(&xr);
+        tmp2 = tmp2.square();
+        tmp2 *= tmp1;
+        tmp2 += xr;
         xr = xl;
         xl = tmp2;
     }
@@ -21,14 +23,14 @@ pub fn mimc<E: Engine>(mut xl: E::Fr, mut xr: E::Fr, constants: &[E::Fr]) -> E::
     xl
 }
 
-pub struct MiMCDemo<'a, E: Engine> {
-    pub xl: Option<E::Fr>,
-    pub xr: Option<E::Fr>,
-    pub constants: &'a [E::Fr],
+pub struct MiMCDemo<'a> {
+    pub xl: Option<Fr>,
+    pub xr: Option<Fr>,
+    pub constants: &'a [Fr],
 }
 
-impl<'a, E: Engine> Circuit<E> for MiMCDemo<'a, E> {
-    fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+impl<'a> Circuit<Fr> for MiMCDemo<'a> {
+    fn synthesize<CS: ConstraintSystem<Fr>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
         assert_eq!(self.constants.len(), MIMC_ROUNDS);
 
         // Allocate the first component of the preimage.
@@ -51,8 +53,8 @@ impl<'a, E: Engine> Circuit<E> for MiMCDemo<'a, E> {
 
             // tmp = (xL + Ci)^2
             let tmp_value = xl_value.map(|mut e| {
-                e.add_assign(&self.constants[i]);
-                e.square();
+                e += self.constants[i];
+                e = e.square();
                 e
             });
             let tmp = cs.alloc(
@@ -71,9 +73,9 @@ impl<'a, E: Engine> Circuit<E> for MiMCDemo<'a, E> {
             // new_xL = xR + tmp * (xL + Ci)
             // new_xL - xR = tmp * (xL + Ci)
             let new_xl_value = xl_value.map(|mut e| {
-                e.add_assign(&self.constants[i]);
-                e.mul_assign(&tmp_value.unwrap());
-                e.add_assign(&xr_value.unwrap());
+                e += self.constants[i];
+                e *= tmp_value.unwrap();
+                e += xr_value.unwrap();
                 e
             });
 
