@@ -50,7 +50,10 @@ use storage_proofs_porep::stacked::{
 use storage_proofs_post::fallback::{
     FallbackPoSt, FallbackPoStCircuit, FallbackPoStCompound, PublicParams as PoStPublicParams,
 };
-use storage_proofs_update::{EmptySectorUpdateCircuit, EmptySectorUpdateCompound};
+use storage_proofs_update::{
+    circuit_poseidon::EmptySectorUpdateCircuit as EmptySectorUpdatePoseidonCircuit,
+    EmptySectorUpdateCircuit, EmptySectorUpdateCompound,
+};
 
 // First trusted-setup (July and August-2020).
 const API_VERSION_TS_1: ApiVersion = ApiVersion::V1_0_0;
@@ -86,6 +89,7 @@ enum Proof {
     Winning,
     Window,
     Update,
+    UpdatePoseidon,
 }
 
 impl Proof {
@@ -95,6 +99,7 @@ impl Proof {
             Proof::Winning => "Winning",
             Proof::Window => "Window",
             Proof::Update => "Update",
+            Proof::UpdatePoseidon => "UpdatePoseidon",
         }
     }
 
@@ -104,6 +109,7 @@ impl Proof {
             Proof::Winning => "winning",
             Proof::Window => "window",
             Proof::Update => "update",
+            Proof::UpdatePoseidon => "updatep",
         }
     }
 }
@@ -260,6 +266,7 @@ fn parse_params_filename(path: &str) -> (Proof, Hasher, Sector, String, usize, P
         "winning" => Proof::Winning,
         "window" => Proof::Window,
         "update" => Proof::Update,
+        "updatep" => Proof::UpdatePoseidon,
         other => panic!("invalid proof name in params filename: {}", other),
     };
 
@@ -378,12 +385,31 @@ fn blank_window_post_poseidon_params<Tree: 'static + MerkleTreeTrait>(
     window_post_public_params::<Tree>(&post_config).expect("window post public params failed")
 }
 
-fn blank_update_poseidon_params<TreeR: 'static + MerkleTreeTrait>(
+// Circuit uses SHA256 as the TreeD hasher and Poseidon as the TreeR hasher.
+fn blank_update_params<TreeR: 'static + MerkleTreeTrait>(
     sector_size: u64,
 ) -> storage_proofs_update::PublicParams {
     let sector_nodes = (sector_size >> 5) as usize;
     storage_proofs_update::constants::validate_tree_r_shape::<TreeR>(sector_nodes);
     storage_proofs_update::PublicParams::from_sector_size(sector_size)
+}
+
+// Circuit uses Poseidon as the TreeD and TreeR hasher.
+fn blank_update_poseidon_params<TreeR: 'static + MerkleTreeTrait>(
+    sector_size: u64,
+) -> storage_proofs_update::PublicParams {
+    let sector_nodes = (sector_size >> 5) as usize;
+    storage_proofs_update::constants::validate_tree_r_shape::<TreeR>(sector_nodes);
+    storage_proofs_update::PublicParams {
+        sector_nodes,
+        // EmptySectorUpdatePoseidon proofs do not use these fields.
+        challenge_count: 0,
+        challenge_bit_len: 0,
+        partition_count: 0,
+        partition_bit_len: 0,
+        apex_leaf_count: 0,
+        apex_leaf_bit_len: 0,
+    }
 }
 
 /// Creates the first phase2 parameters for a circuit and writes them to a file.
@@ -456,9 +482,20 @@ fn create_initial_params<Tree: 'static + MerkleTreeTrait<Hasher = PoseidonHasher
             params
         }
         (Proof::Update, Hasher::Poseidon) => {
-            let pub_params = blank_update_poseidon_params::<Tree>(sector_size.as_u64());
+            let pub_params = blank_update_params::<Tree>(sector_size.as_u64());
             info!("creating empty witness");
             let circuit = EmptySectorUpdateCompound::<Tree>::blank_circuit(&pub_params);
+            info!("generating phase2 params for circuit");
+            let start = Instant::now();
+            let params =
+                MPCParameters::new(circuit, check_subgroup).expect("mpc params new failure");
+            dt_create_params = start.elapsed().as_secs();
+            params
+        }
+        (Proof::UpdatePoseidon, Hasher::Poseidon) => {
+            let pub_params = blank_update_poseidon_params::<Tree>(sector_size.as_u64());
+            info!("creating empty witness");
+            let circuit = EmptySectorUpdatePoseidonCircuit::<Tree>::blank(pub_params);
             info!("generating phase2 params for circuit");
             let start = Instant::now();
             let params =
@@ -1155,11 +1192,22 @@ fn parameter_identifier<Tree: 'static + MerkleTreeTrait<Hasher = PoseidonHasher>
             >>::cache_identifier(&public_params)
         }
         Proof::Update => {
-            let pub_params = blank_update_poseidon_params::<Tree>(sector_size);
+            let pub_params = blank_update_params::<Tree>(sector_size);
             <EmptySectorUpdateCompound<Tree> as CacheableParameters<
                 EmptySectorUpdateCircuit<Tree>,
                 _,
             >>::cache_identifier(&pub_params)
+        }
+        Proof::UpdatePoseidon => {
+            // TODO: implement CompoundProof for EmptySectorUpdatePoseidon circuit
+            /*
+            let pub_params = blank_update_poseidon_params::<Tree>(sector_size);
+            <EmptySectorUpdatePoseidonCompound<Tree> as CacheableParameters<
+                EmptySectorUpdatePoseidonCircuit<Tree>,
+                _,
+            >>::cache_identifier(&pub_params)
+            */
+            unimplemented!("CompoundProof is not implemented for EmptySectorUpdatePoseion");
         }
     }
 }
@@ -1188,9 +1236,15 @@ fn main() {
                 .long("update")
                 .help("Generate Empty-Sector-Update parameters"),
         )
+        .arg(
+            Arg::with_name("updatep")
+                .long("updatep")
+                .visible_alias("updateposeidon")
+                .help("Generate Empty-Sector-Update-Poseidon parameters"),
+        )
         .group(
             ArgGroup::with_name("proof")
-                .args(&["sdr", "winning", "window", "update"])
+                .args(&["sdr", "winning", "window", "update", "updatep"])
                 .required(true)
                 .multiple(false),
         )
@@ -1398,8 +1452,10 @@ fn main() {
                     Proof::Winning
                 } else if matches.is_present("window") {
                     Proof::Window
-                } else {
+                } else if matches.is_present("update") {
                     Proof::Update
+                } else {
+                    Proof::UpdatePoseidon
                 };
 
                 // Default to using Poseidon for the hasher.

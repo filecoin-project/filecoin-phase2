@@ -19,11 +19,21 @@ crossbeam = "=0.8.1"
 dialoguer = "=0.8.0"
 ff = "=0.11.0"
 fff = "=0.3.1"
-# TODO: remove git dependency and pin version
+
+# TODO: remove git dependency and pin version:
+
+# Should be final version:
 # filecoin-hashers = { version = "^5.0.0", default-features = false }
 # filecoin-proofs = { version = "^10.0.0", default-features = false }
-filecoin-hashers = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
-filecoin-proofs = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+
+# Working (before adding Kuba's 2nd circuit)
+# filecoin-hashers = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+# filecoin-proofs = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+
+# Use when adding Kuba's 2nd circuit:
+filecoin-hashers = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
+filecoin-proofs = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
+
 group = "=0.11.0"
 groupy = "=0.4.1"
 hex = "=0.4.3"
@@ -32,19 +42,33 @@ num_cpus = "=1.13.0"
 paired = "=0.22.0"
 pairing = "=0.21.0"
 rand = "=0.8.4"
+# `rand` used during trusted-setup #1.
 rand_ts1 = { package = "rand", version = "=0.7.3" }
 rand_chacha = "=0.3.1"
+# `rand_chacha` used during trusted-setup #1.
 rand_chacha_ts1 = { package = "rand_chacha", version = "=0.2.1" }
 rayon = "=1.5.1"
 simplelog = "=0.8.0"
-# TODO: remove git dependency and pin version
+
+# TODO: remove git dependency and pin version:
+
+# Should be final version:
 # storage-proofs-core = { version = "^10.0.0", default-features = false }
 # storage-proofs-porep = { version = "^10.0.0", default-features = false }
 # storage-proofs-post = { version = "^10.0.0", default-features = false }
-storage-proofs-core = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
-storage-proofs-porep = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
-storage-proofs-post = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
-storage-proofs-update = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+# storage-proofs-update = { ... }
+
+# Working (before adding Kuba's circuit):
+# storage-proofs-core = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+# storage-proofs-porep = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+# storage-proofs-post = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+# storage-proofs-update = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "empty-sector-update", default-features = false }
+
+# Using with Kuba's circuit
+storage-proofs-core = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
+storage-proofs-porep = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
+storage-proofs-post = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
+storage-proofs-update = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
 
 [features]
 default = []
