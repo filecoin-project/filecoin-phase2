@@ -51,7 +51,10 @@ use storage_proofs_post::fallback::{
     FallbackPoSt, FallbackPoStCircuit, FallbackPoStCompound, PublicParams as PoStPublicParams,
 };
 use storage_proofs_update::{
-    circuit_poseidon::EmptySectorUpdateCircuit as EmptySectorUpdatePoseidonCircuit,
+    poseidon::{
+        EmptySectorUpdateCircuit as EmptySectorUpdatePoseidonCircuit,
+        EmptySectorUpdateCompound as EmptySectorUpdatePoseidonCompound,
+    },
     EmptySectorUpdateCircuit, EmptySectorUpdateCompound,
 };
 
@@ -400,16 +403,7 @@ fn blank_update_poseidon_params<TreeR: 'static + MerkleTreeTrait>(
 ) -> storage_proofs_update::PublicParams {
     let sector_nodes = (sector_size >> 5) as usize;
     storage_proofs_update::constants::validate_tree_r_shape::<TreeR>(sector_nodes);
-    storage_proofs_update::PublicParams {
-        sector_nodes,
-        // EmptySectorUpdatePoseidon proofs do not use these fields.
-        challenge_count: 0,
-        challenge_bit_len: 0,
-        partition_count: 0,
-        partition_bit_len: 0,
-        apex_leaf_count: 0,
-        apex_leaf_bit_len: 0,
-    }
+    storage_proofs_update::PublicParams::from_sector_size_poseidon(sector_size)
 }
 
 /// Creates the first phase2 parameters for a circuit and writes them to a file.
@@ -1199,15 +1193,11 @@ fn parameter_identifier<Tree: 'static + MerkleTreeTrait<Hasher = PoseidonHasher>
             >>::cache_identifier(&pub_params)
         }
         Proof::UpdatePoseidon => {
-            // TODO: implement CompoundProof for EmptySectorUpdatePoseidon circuit
-            /*
             let pub_params = blank_update_poseidon_params::<Tree>(sector_size);
             <EmptySectorUpdatePoseidonCompound<Tree> as CacheableParameters<
                 EmptySectorUpdatePoseidonCircuit<Tree>,
                 _,
             >>::cache_identifier(&pub_params)
-            */
-            unimplemented!("CompoundProof is not implemented for EmptySectorUpdatePoseion");
         }
     }
 }
