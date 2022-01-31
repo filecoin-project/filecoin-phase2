@@ -19,17 +19,8 @@ crossbeam = "=0.8.1"
 dialoguer = "=0.8.0"
 ff = "=0.11.0"
 fff = "=0.3.1"
-
-# TODO: change dependencies once `rust-fil-proofs` is released with final empty-sector-update code
-
-# Final version should be close to this:
-# filecoin-hashers = { version = "^6.0.0", default-features = false }
-# filecoin-proofs = { version = "^11.0.0", default-features = false }
-
-# Using Kuba's circuit with compound-proof:
-filecoin-hashers = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
-filecoin-proofs = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
-
+filecoin-hashers = { version = "=6.0.1", default-features = false }
+filecoin-proofs = { version = "=11.0.1", default-features = false }
 group = "=0.11.0"
 groupy = "=0.4.1"
 hex = "=0.4.3"
@@ -37,46 +28,15 @@ log = "=0.4.14"
 num_cpus = "=1.13.0"
 paired = "=0.22.0"
 pairing = "=0.21.0"
+# `rand` and `rand_chacha` versions used during Filecoin's second trusted-setup (EmptySectorUpdate/SnapDeals).
 rand = "=0.8.4"
-# `rand` used during trusted-setup #1.
-rand_ts1 = { package = "rand", version = "=0.7.3" }
 rand_chacha = "=0.3.1"
-# `rand_chacha` used during trusted-setup #1.
+# `rand` and `rand_chacha` versions used during Filecoin's first trusted-setup (SDR-PoRep, Winning and Window-PoSt).
+rand_ts1 = { package = "rand", version = "=0.7.3" }
 rand_chacha_ts1 = { package = "rand_chacha", version = "=0.2.1" }
 rayon = "=1.5.1"
 simplelog = "=0.8.0"
-
-# TODO: change dependencies once `rust-fil-proofs` is released with final empty-sector-update code
-
-# Final version should be close to this:
-# storage-proofs-core = { version = "^11.0.0", default-features = false }
-# storage-proofs-porep = { version = "^11.0.0", default-features = false }
-# storage-proofs-post = { version = "^11.0.0", default-features = false }
-# storage-proofs-update = { version = "^11.0.0", default-features = false }
-
-# Using Kuba's circuit with compound-proof:
-storage-proofs-core = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
-storage-proofs-porep = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
-storage-proofs-post = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
-storage-proofs-update = { git = "https://github.com/filecoin-project/rust-fil-proofs.git", branch = "esu/poseidon", default-features = false }
-
-[features]
-default = []
-opencl = [
-    "bellperson/opencl",
-    "filecoin-hashers/opencl",
-    "filecoin-proofs/opencl",
-    "storage-proofs-core/opencl",
-    "storage-proofs-porep/opencl",
-    "storage-proofs-post/opencl",
-    "storage-proofs-update/opencl",
-]
-cuda = [
-    "bellperson/cuda",
-    "filecoin-hashers/cuda",
-    "filecoin-proofs/cuda",
-    "storage-proofs-core/cuda",
-    "storage-proofs-porep/cuda",
-    "storage-proofs-post/cuda",
-    "storage-proofs-update/cuda",
-]
+storage-proofs-core = { version = "=11.0.1", default-features = false }
+storage-proofs-porep = { version = "=11.0.1", default-features = false }
+storage-proofs-post = { version = "=11.0.1", default-features = false }
+storage-proofs-update = { version = "=11.0.1", default-features = false }
