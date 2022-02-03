@@ -1526,17 +1526,23 @@ fn main() {
                 let (proof, hasher, sector_size, head, param_num_before, _param_size, read_raw) =
                     parse_params_filename(path_before);
 
+                let ts1 = head == HEAD_TS1;
+
                 if read_raw {
-                    assert_eq!(
-                        head, HEAD_TS1,
-                        "raw format may only be used during trusted-setup #1"
+                    assert!(ts1, "raw format may only be used during trusted-setup #1");
+                }
+
+                // TODO: add support for contributing to trusted-setup #1
+                if ts1 {
+                    unimplemented!(
+                        "contributing to trusted-setup #1 params is currenly not supported",
                     );
                 }
 
                 let param_num = param_num_before + 1;
 
                 // Default to using the raw format for Filecoin's first trusted-setup.
-                let write_raw = head == HEAD_TS1;
+                let write_raw = ts1;
 
                 if matches.is_present("no-log") {
                     setup_logger(None);
