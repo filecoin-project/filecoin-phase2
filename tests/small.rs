@@ -4,20 +4,19 @@ use std::fs::{remove_file, File};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
-use bellperson::bls::{Bls12, Fr};
 use bellperson::groth16::{create_random_proof, prepare_verifying_key, verify_proof};
-use fff::Field;
-use filecoin_phase2::small::{
-    read_small_params_from_large_file, verify_contribution_small, MPCSmall,
+use blstrs::Scalar as Fr;
+use ff::Field;
+use filecoin_phase2::{
+    small::{verify_contribution_small, MPCSmall},
+    verify_contribution, MPCParameters,
 };
-use filecoin_phase2::{verify_contribution, MPCParameters};
 use rand::{thread_rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 
 use mimc::{mimc as mimc_hash, MiMCDemo, MIMC_ROUNDS};
 
 #[test]
-#[ignore]
 fn test_mimc_small_params() {
     assert!(
         Path::new("./phase1radix2m10").exists(),
@@ -28,7 +27,7 @@ fn test_mimc_small_params() {
         .map(|_| Fr::random(&mut thread_rng()))
         .collect::<Vec<_>>();
 
-    let circuit = MiMCDemo::<Bls12> {
+    let circuit = MiMCDemo {
         xl: None,
         xr: None,
         constants: &constants,
@@ -38,7 +37,7 @@ fn test_mimc_small_params() {
     let mut rng_small = ChaChaRng::from_seed([0u8; 32]);
 
     // Create the initial params.
-    let initial_large = MPCParameters::new(circuit).unwrap();
+    let initial_large = MPCParameters::new(circuit, true).unwrap();
     let initial_small = initial_large.copy_small();
 
     let mut large_added = initial_large.copy();
@@ -70,7 +69,7 @@ fn test_mimc_small_params() {
         "first large contribution does not match verified contribution"
     );
 
-    let verified_small = verify_contribution_small(&initial_small, &first_small)
+    let verified_small = verify_contribution_small(&initial_small, &first_small, false)
         .expect("first small verify_contribution_small() failed");
     assert_eq!(
         &first_small_contrib[..],
@@ -110,7 +109,7 @@ fn test_mimc_small_params() {
         "second large contribution does not match verified contribution"
     );
 
-    let verified_small = verify_contribution_small(&first_small, &second_small)
+    let verified_small = verify_contribution_small(&first_small, &second_small, false)
         .expect("second small verify_contribution_small() failed");
     assert_eq!(
         &second_small_contrib[..],
@@ -120,16 +119,19 @@ fn test_mimc_small_params() {
 
     // Verify that the second large and small params are consistent.
     assert!(second_large.has_last_contrib(&second_small));
-    large_added.add_contrib(second_small.clone());
+    large_added.add_contrib(second_small);
     assert_eq!(large_added, second_large);
 
     // Verify large params against circuit.
     let all_contributions = large_added
-        .verify(MiMCDemo::<Bls12> {
-            xl: None,
-            xr: None,
-            constants: &constants,
-        })
+        .verify(
+            MiMCDemo {
+                xl: None,
+                xr: None,
+                constants: &constants,
+            },
+            true,
+        )
         .unwrap();
     assert_eq!(all_contributions.len(), 2);
     assert_eq!(&all_contributions[0][..], &first_large_contrib[..]);
@@ -141,7 +143,7 @@ fn test_mimc_small_params() {
     // Generate a random preimage and compute the image.
     let xl = Fr::random(&mut thread_rng());
     let xr = Fr::random(&mut thread_rng());
-    let image = mimc_hash::<Bls12>(xl, xr, &constants);
+    let image = mimc_hash(xl, xr, &constants);
     // Create an instance of the circuit (with the witness).
     let circuit = MiMCDemo {
         xl: Some(xl),
@@ -155,16 +157,7 @@ fn test_mimc_small_params() {
 }
 
 #[test]
-#[ignore]
 fn test_small_file_io() {
-    //test_small_file_io_inner()
-}
-
-// This test is marked as ignore because we haven't checked-in the phase1 file required for this
-// test to pass when run via CI. To run this test you must have the correct phase1 params file in
-// the top level directory of this crate.
-#[allow(dead_code)]
-fn test_small_file_io_inner() {
     const LARGE_PATH: &str = "./tests/large_params";
     const SMALL_PATH: &str = "./tests/small_params";
 
@@ -188,13 +181,13 @@ fn test_small_file_io_inner() {
         .map(|_| Fr::random(&mut thread_rng()))
         .collect::<Vec<_>>();
 
-    let circuit = MiMCDemo::<Bls12> {
+    let circuit = MiMCDemo {
         xl: None,
         xr: None,
         constants: &constants,
     };
 
-    let large_params = MPCParameters::new(circuit).unwrap();
+    let large_params = MPCParameters::new(circuit, true).unwrap();
     let small_params = large_params.copy_small();
 
     {
@@ -212,14 +205,14 @@ fn test_small_file_io_inner() {
     {
         let file = File::open(SMALL_PATH).unwrap();
         let mut reader = BufReader::with_capacity(1024 * 1024, file);
-        let small_read = MPCSmall::read(&mut reader, false, false).unwrap();
+        let small_read = MPCSmall::read(&mut reader, false, true).unwrap();
         assert_eq!(small_read, small_params);
         assert!(large_params.has_last_contrib(&small_read));
     };
 
     // Test `read_small_params_from_large_file()`.
     {
-        let small_read = read_small_params_from_large_file(LARGE_PATH).unwrap();
+        let small_read = MPCSmall::read_from_large_file(LARGE_PATH, true).unwrap();
         assert_eq!(small_read, small_params);
     }
 }
